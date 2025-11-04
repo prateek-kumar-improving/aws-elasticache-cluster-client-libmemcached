@@ -965,7 +965,7 @@ char inline *_retrieve_config_with_retries(memcached_st *ptr, memcached_return_t
     else
     {
       retry_count++;
-      if (config != NULL) free(config);
+      if (config != NULL) libmemcached_free(ptr, config);
     }
   }
 

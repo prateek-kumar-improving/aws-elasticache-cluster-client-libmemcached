@@ -291,7 +291,7 @@ static inline char *_config_get(memcached_st *ptr)
     {
       cur_position = server_idx;
 
-      if (config != NULL) free(config);
+      if (config != NULL) libmemcached_free(ptr, config);
     }
   }
 
@@ -364,7 +364,7 @@ static inline void _update_server_list(memcached_st *ptr)
     ptr->polling.last_successful = time(NULL);
   }
 
-  free(config);
+  libmemcached_free(ptr, config);
 
 }
 
