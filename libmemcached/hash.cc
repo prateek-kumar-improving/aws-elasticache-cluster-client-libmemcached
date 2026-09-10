@@ -227,6 +227,22 @@ static inline void _update_current_version(memcached_st *ptr, uint64_t config_ve
 }
 
 /**
+ * Update ONLY the recorded config string, leaving current_config_version
+ * unchanged. Used when the config text changed (e.g. a node's IP moved after an
+ * in-place replacement) but the config version integer did not advance. This
+ * lets us apply the new server list once and then avoid rebuilding on every
+ * subsequent poll, while keeping current_config_version monotonic.
+ */
+static inline void _update_current_config_only(memcached_st *ptr, const char* config)
+{
+    if (ptr->polling.current_config != NULL)
+    {
+      free(ptr->polling.current_config);
+    }
+    ptr->polling.current_config = strdup(config);
+}
+
+/**
  * A poor man's iterator through the array of server structures, returns index
  * of the next server from the current position.
  */
@@ -335,7 +351,8 @@ static inline void _update_server_list(memcached_st *ptr)
   bool isUpdateSuccessful = true;
 
   // detect change
-  // if strings don't match then check config version values, do nothing otherwise
+  // if the config string differs, rebuild the server list (regardless of the
+  // version integer); do nothing when the config string is identical.
   if (ptr->polling.current_config == NULL)
   {
     uint64_t config_version_number = _get_config_version_number(config);
@@ -349,12 +366,34 @@ static inline void _update_server_list(memcached_st *ptr)
   else if (strcmp(ptr->polling.current_config, config) != 0)
   {
     uint64_t config_version_number = _get_config_version_number(config);
-    if (config_version_number > ptr->polling.current_config_version)
+    // The config TEXT has already changed (e.g. a node's IP moved after an
+    // in-place replacement). A change in the config string is authoritative
+    // that the topology moved, so we must rebuild the server list even when the
+    // config version integer did NOT advance.
+    //
+    // Previously this rebuild was gated on
+    //   config_version_number > ptr->polling.current_config_version
+    // which meant an in-place replacement (same version integer, new IP) was
+    // silently ignored: the client kept a dead socket and every request failed
+    // with "A TIMEOUT OCCURRED, No active_fd were found" until manual
+    // intervention. See ELMO-125433.
+    //
+    // We still keep the recorded version monotonic: only advance the stored
+    // version when the new value is actually greater, but always apply the new
+    // server list when the config text differs.
+    isUpdateSuccessful = _apply_new_server_list(ptr, config);
+    if (isUpdateSuccessful)
     {
-      isUpdateSuccessful = _apply_new_server_list(ptr, config);
-      if (isUpdateSuccessful)
+      if (config_version_number > ptr->polling.current_config_version)
       {
         _update_current_version(ptr, config_version_number, config);
+      }
+      else
+      {
+        // Version integer unchanged (or stale) but endpoints moved: refresh the
+        // recorded config text so we don't rebuild again on every poll, while
+        // leaving current_config_version untouched to preserve monotonicity.
+        _update_current_config_only(ptr, config);
       }
     }
   }
