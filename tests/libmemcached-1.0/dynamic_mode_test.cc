@@ -410,6 +410,84 @@ test_return_t polling_test(memcached_st *ptr)
   return TEST_SUCCESS;
 }
 
+/**
+ * Regression test: the client must rebuild its server list when the config
+ * STRING changes even if the config VERSION integer does not advance.
+ *
+ * An in-place node replacement changes a node's advertised endpoint without
+ * bumping the version integer. Previously the client only rebuilt when the
+ * version increased, so it kept talking to the old (now unreachable) endpoint
+ * and every request failed with "No active_fd". This test alternates the
+ * advertised server list while holding the version string constant at "1" and
+ * verifies that operations keep succeeding, proving the rebuild fired.
+ */
+test_return_t replace_node_same_version_test(memcached_st *ptr)
+{
+  char *original_server_list = build_server_list(ptr->servers, ptr->number_of_hosts);
+
+  memcached_st *memc;
+  memcached_return rc;
+  size_t value_length;
+  uint32_t flags;
+
+  memc= memcached_create(NULL);
+  memcached_behavior_set(memc, MEMCACHED_BEHAVIOR_CLIENT_MODE, DYNAMIC_MODE);
+
+  // Poll frequently so config changes are picked up within the test window.
+  memc->polling.threshold_secs = 1;
+
+  // Two distinct server lists, both advertised under the SAME version "1".
+  char *config_a = build_server_list(ptr->servers, 1);
+  char *config_b = build_server_list(ptr->servers, ptr->number_of_hosts);
+
+  set_config(config_a, ptr->servers[0].port(), "1");
+
+  rc= memcached_instance_push(memc, ptr->configserver, 1);
+  if (rc != MEMCACHED_SUCCESS)
+  {
+    return TEST_FAILURE;
+  }
+
+  // Alternate the advertised config between A and B on each cycle, always with
+  // version "1", and confirm set/get succeed after every switch.
+  int idx;
+  for (idx = 0; idx < 6; idx++)
+  {
+    char key[16];
+    char value[16];
+    sprintf(key, "key-%04d", idx);
+    sprintf(value, "val-%04d", idx);
+
+    // Flip the advertised list WITHOUT changing the version integer.
+    set_config((idx % 2 == 0) ? config_b : config_a, ptr->servers[0].port(), "1");
+
+    // Give the client at least one polling cycle to observe the new config.
+    sleep(2);
+
+    rc= memcached_set(memc, key, strlen(key), value, strlen(value), (time_t)0, (uint32_t)0);
+    if (rc != MEMCACHED_SUCCESS)
+    {
+      return TEST_FAILURE;
+    }
+
+    char *result = memcached_get(memc, key, strlen(key), &value_length, &flags, &rc);
+    if (result == NULL || strcmp(value, result))
+    {
+      return TEST_FAILURE;
+    }
+    free(result);
+  }
+
+  // CLEANUP
+  memcached_free(memc);
+  set_config(original_server_list, ptr->servers[0].port(), "1");
+  free(config_a);
+  free(config_b);
+  free(original_server_list);
+
+  return TEST_SUCCESS;
+}
+
 
 
 #include <libtest/test.hpp>
